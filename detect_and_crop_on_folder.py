@@ -165,6 +165,9 @@ def main():
 
             file_id = image_path.stem
 
+            if args.save_boxes and (output_label_path / f"{file_id}.json").exists():
+                continue
+
             torched_image, scale, raw_image, resize = prepare_image(image_path, args.origin_size, device)
 
             im_height, im_width = torched_image.shape[2:]
