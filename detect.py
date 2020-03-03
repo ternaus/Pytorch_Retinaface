@@ -15,24 +15,26 @@ from utils.box_utils import decode, decode_landm
 from utils.general import remove_prefix
 from utils.nms.py_cpu_nms import py_cpu_nms
 
-parser = argparse.ArgumentParser(description="Retinaface")
 
-parser.add_argument(
-    "-m",
-    "--trained_model",
-    default="./weights/Resnet50_Final.pth",
-    type=str,
-    help="Trained state_dict file path to open",
-)
-parser.add_argument("--network", default="resnet50", help="Backbone network mobile0.25 or resnet50")
-parser.add_argument("--cpu", action="store_true", default=False, help="Use cpu inference")
-parser.add_argument("--confidence_threshold", default=0.02, type=float, help="confidence_threshold")
-parser.add_argument("--top_k", default=5000, type=int, help="top_k")
-parser.add_argument("--nms_threshold", default=0.4, type=float, help="nms_threshold")
-parser.add_argument("--keep_top_k", default=750, type=int, help="keep_top_k")
-parser.add_argument("-s", "--save_image", action="store_true", default=True, help="show detection results")
-parser.add_argument("--vis_thres", default=0.6, type=float, help="visualization_threshold")
-args = parser.parse_args()
+def get_args():
+    parser = argparse.ArgumentParser(description="Retinaface")
+
+    parser.add_argument(
+        "-m",
+        "--trained_model",
+        default="./weights/Resnet50_Final.pth",
+        type=str,
+        help="Trained state_dict file path to open",
+    )
+    parser.add_argument("--network", default="resnet50", help="Backbone network mobile0.25 or resnet50")
+    parser.add_argument("--cpu", action="store_true", default=False, help="Use cpu inference")
+    parser.add_argument("--confidence_threshold", default=0.02, type=float, help="confidence_threshold")
+    parser.add_argument("--top_k", default=5000, type=int, help="top_k")
+    parser.add_argument("--nms_threshold", default=0.4, type=float, help="nms_threshold")
+    parser.add_argument("--keep_top_k", default=750, type=int, help="keep_top_k")
+    parser.add_argument("-s", "--save_image", action="store_true", default=True, help="show detection results")
+    parser.add_argument("--vis_thres", default=0.6, type=float, help="visualization_threshold")
+    return parser.parse_args()
 
 
 def check_keys(model, pretrained_state_dict):
@@ -64,7 +66,8 @@ def load_model(model, pretrained_path, load_to_cpu):
     return model
 
 
-if __name__ == "__main__":
+def main():
+    args = get_args()
     torch.set_grad_enabled(False)
     cfg = None
     if args.network == "mobile0.25":
@@ -90,7 +93,7 @@ if __name__ == "__main__":
 
         img = np.float32(img_raw)
 
-        im_height, im_width, _ = img.shape
+        im_height, im_width = img.shape[:2]
         scale = torch.Tensor([img.shape[1], img.shape[0], img.shape[1], img.shape[0]])
         img -= (104, 117, 123)
         img = img.transpose(2, 0, 1)
@@ -176,3 +179,7 @@ if __name__ == "__main__":
 
             name = "test.jpg"
             cv2.imwrite(name, img_raw)
+
+
+if __name__ == "__main__":
+    main()

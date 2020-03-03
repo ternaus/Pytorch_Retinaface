@@ -1,27 +1,32 @@
 from __future__ import print_function
 
 import argparse
-from utils.general import remove_prefix
+
 import torch
 
 from data import cfg_mnet, cfg_re50
 from models.retinaface import RetinaFace
+from utils.general import remove_prefix
 
-parser = argparse.ArgumentParser(description="Test")
-parser.add_argument(
-    "-m",
-    "--trained_model",
-    default="./weights/mobilenet0.25_Final.pth",
-    type=str,
-    help="Trained state_dict file path to open",
-)
-parser.add_argument("--network", default="mobile0.25", help="Backbone network mobile0.25 or resnet50")
-parser.add_argument(
-    "--long_side", default=640, help="when origin_size is false, long_side is scaled size(320 or 640 for long side)"
-)
-parser.add_argument("--cpu", action="store_true", default=True, help="Use cpu inference")
 
-args = parser.parse_args()
+def get_args():
+    parser = argparse.ArgumentParser(description="Test")
+    parser.add_argument(
+        "-m",
+        "--trained_model",
+        default="./weights/mobilenet0.25_Final.pth",
+        type=str,
+        help="Trained state_dict file path to open",
+    )
+    parser.add_argument("--network", default="mobile0.25", help="Backbone network mobile0.25 or resnet50")
+    parser.add_argument(
+        "--long_side",
+        default=640,
+        help="when origin_size is false, long_side is scaled size(320 or 640 for long side)",
+    )
+    parser.add_argument("--cpu", action="store_true", default=True, help="Use cpu inference")
+
+    return parser.parse_args()
 
 
 def check_keys(model, pretrained_state_dict):
@@ -53,7 +58,8 @@ def load_model(model, pretrained_path, load_to_cpu):
     return model
 
 
-if __name__ == "__main__":
+def main():
+    args = get_args()
     torch.set_grad_enabled(False)
     cfg = None
     if args.network == "mobile0.25":
@@ -76,6 +82,10 @@ if __name__ == "__main__":
     output_names = ["output0"]
     inputs = torch.randn(1, 3, args.long_side, args.long_side).to(device)
 
-    torch_out = torch.onnx._export(
+    torch.onnx._export(
         net, inputs, output_onnx, export_params=True, verbose=False, input_names=input_names, output_names=output_names
     )
+
+
+if __name__ == "__main__":
+    main()
