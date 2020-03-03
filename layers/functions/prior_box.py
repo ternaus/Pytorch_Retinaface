@@ -1,11 +1,10 @@
 import torch
 from itertools import product as product
-import numpy as np
 from math import ceil
 
 
 class PriorBox(object):
-    def __init__(self, cfg, image_size=None, phase="train"):
+    def __init__(self, cfg, image_size=None):
         super(PriorBox, self).__init__()
         self.min_sizes = cfg["min_sizes"]
         self.steps = cfg["steps"]

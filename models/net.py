@@ -1,13 +1,9 @@
-import time
 import torch
-import torch.nn as nn
-import torchvision.models._utils as _utils
-import torchvision.models as models
 import torch.nn.functional as F
-from torch.autograd import Variable
+from torch import nn
 
 
-def conv_bn(inp, oup, stride=1, leaky=0):
+def conv_bn(inp, oup, stride=1, leaky: float = 0):
     return nn.Sequential(
         nn.Conv2d(inp, oup, 3, stride, 1, bias=False),
         nn.BatchNorm2d(oup),
@@ -19,7 +15,7 @@ def conv_bn_no_relu(inp, oup, stride):
     return nn.Sequential(nn.Conv2d(inp, oup, 3, stride, 1, bias=False), nn.BatchNorm2d(oup),)
 
 
-def conv_bn1X1(inp, oup, stride, leaky=0):
+def conv_bn1X1(inp, oup, stride, leaky: float = 0):
     return nn.Sequential(
         nn.Conv2d(inp, oup, 1, stride, padding=0, bias=False),
         nn.BatchNorm2d(oup),
@@ -27,7 +23,7 @@ def conv_bn1X1(inp, oup, stride, leaky=0):
     )
 
 
-def conv_dw(inp, oup, stride, leaky=0.1):
+def conv_dw(inp, oup, stride, leaky: float = 0.1):
     return nn.Sequential(
         nn.Conv2d(inp, inp, 3, stride, 1, groups=inp, bias=False),
         nn.BatchNorm2d(inp),

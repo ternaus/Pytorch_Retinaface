@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
+from iglovikov_helper_functions.utils.img_tools import load_rgb
 from tqdm import tqdm
 
 from data import cfg_mnet, cfg_re50
@@ -26,6 +27,7 @@ from models.retinaface import RetinaFace
 from utils.box_utils import decode, decode_landm
 from utils.general import load_model
 from utils.nms.py_cpu_nms import py_cpu_nms
+from jpeg4py import JPEGRuntimeError
 
 
 def split_array(array_length: int, num_splits: int, split_id: int) -> Tuple[int, int]:
@@ -77,7 +79,43 @@ def get_args():
     arg("-s", "--save_crops", action="store_true", default=False, help="If we want to store crops.")
     arg("-b", "--save_boxes", action="store_true", default=False, help="If we want to store bounding boxes.")
     arg("--origin_size", default=True, type=str, help="Whether use origin image size to evaluate")
+    arg("--fp16", action="store_true", help="Whether use fp16")
     return parser.parse_args()
+
+
+def prepare_image(image_path: (str, Path), origin_size, device):
+    try:
+        raw_image = load_rgb(image_path, lib="jpeg4py")
+    except JPEGRuntimeError:
+        raw_image = load_rgb(image_path, lib="cv2")
+
+    img = raw_image.copy().astype(np.float32)
+
+    # testing scale
+    target_size = 1600
+    max_size = 2150
+    im_shape = img.shape
+    im_size_min = np.min(im_shape[0:2])
+    im_size_max = np.max(im_shape[0:2])
+    resize = float(target_size) / float(im_size_min)
+    # prevent bigger axis from being more than max_size:
+    if np.round(resize * im_size_max) > max_size:
+        resize = float(max_size) / float(im_size_max)
+    if origin_size:
+        resize = 1
+
+    if resize != 1:
+        img = cv2.resize(img, None, None, fx=resize, fy=resize, interpolation=cv2.INTER_LINEAR)
+
+    im_height, im_width = img.shape[:2]
+    scale = torch.Tensor([im_width, im_height, im_width, im_height])
+    img -= (104, 117, 123)
+    img = img.transpose(2, 0, 1)
+    img = torch.from_numpy(img).unsqueeze(0)
+    img = img.to(device)
+    scale = scale.to(device)
+
+    return img, scale, raw_image, resize
 
 
 def main():
@@ -95,6 +133,8 @@ def main():
     net = RetinaFace(cfg=cfg, phase="test")
     net = load_model(net, args.trained_model, args.cpu)
     net.eval()
+    if args.fp16:
+        net = net.half()
 
     print("Finished loading model!")
     # print(net)
@@ -124,41 +164,20 @@ def main():
             labels = []
 
             file_id = image_path.stem
-            raw_image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-            img = raw_image.copy().astype(np.float32)
 
-            raw_image = cv2.cvtColor(raw_image, cv2.COLOR_RGB2BGR)
+            torched_image, scale, raw_image, resize = prepare_image(image_path, args.origin_size, device)
 
-            # testing scale
-            target_size = 1600
-            max_size = 2150
-            im_shape = img.shape
-            im_size_min = np.min(im_shape[0:2])
-            im_size_max = np.max(im_shape[0:2])
-            resize = float(target_size) / float(im_size_min)
-            # prevent bigger axis from being more than max_size:
-            if np.round(resize * im_size_max) > max_size:
-                resize = float(max_size) / float(im_size_max)
-            if args.origin_size:
-                resize = 1
+            im_height, im_width = torched_image.shape[2:]
 
-            if resize != 1:
-                img = cv2.resize(img, None, None, fx=resize, fy=resize, interpolation=cv2.INTER_LINEAR)
-
-            im_height, im_width = img.shape[:2]
-            scale = torch.Tensor([im_width, im_height, im_width, im_height])
-            img -= (104, 117, 123)
-            img = img.transpose(2, 0, 1)
-            img = torch.from_numpy(img).unsqueeze(0)
-            img = img.to(device)
-            scale = scale.to(device)
-
-            loc, conf, landmarks = net(img)  # forward pass
+            if args.fp16:
+                torched_image = torched_image.half()
+            loc, conf, landmarks = net(torched_image)  # forward pass
 
             priorbox = PriorBox(cfg, image_size=(im_height, im_width))
             priors = priorbox.forward()
             priors = priors.to(device)
             prior_data = priors.data
+
             boxes = decode(loc.data.squeeze(0), prior_data, cfg["variance"])
             boxes = boxes * scale / resize
             boxes = boxes.cpu().numpy()
@@ -167,16 +186,16 @@ def main():
             landmarks = decode_landm(landmarks.data.squeeze(0), prior_data, cfg["variance"])
             scale1 = torch.Tensor(
                 [
-                    img.shape[3],
-                    img.shape[2],
-                    img.shape[3],
-                    img.shape[2],
-                    img.shape[3],
-                    img.shape[2],
-                    img.shape[3],
-                    img.shape[2],
-                    img.shape[3],
-                    img.shape[2],
+                    im_width,
+                    im_height,
+                    im_width,
+                    im_height,
+                    im_width,
+                    im_height,
+                    im_width,
+                    im_height,
+                    im_width,
+                    im_height,
                 ]
             )
             scale1 = scale1.to(device)
@@ -230,7 +249,7 @@ def main():
 
                     crop_file_path = target_folder / f"{file_id}_{crop_id}.jpg"
 
-                    if crop_file_path.exist():
+                    if crop_file_path.exists():
                         continue
 
                     cv2.imwrite(
