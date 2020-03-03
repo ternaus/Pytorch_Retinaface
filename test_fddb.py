@@ -13,7 +13,6 @@ from data import cfg_mnet, cfg_re50
 from layers.functions.prior_box import PriorBox
 from models.retinaface import RetinaFace
 from utils.box_utils import decode, decode_landm
-from utils.general import remove_prefix
 from utils.nms.py_cpu_nms import py_cpu_nms
 from utils.timer import Timer
 from utils.general import load_model

@@ -210,7 +210,8 @@ class preproc(object):
         self.rgb_means = rgb_means
 
     def __call__(self, image, targets):
-        assert targets.shape[0] > 0, "this image does not have gt"
+        if targets.shape[0] == 0:
+            raise ValueError("this image does not have gt")
 
         boxes = targets[:, :4].copy()
         labels = targets[:, -1].copy()
@@ -220,7 +221,7 @@ class preproc(object):
         image_t = _distort(image_t)
         image_t = _pad_to_square(image_t, self.rgb_means, pad_image_flag)
         image_t, boxes_t, landm_t = _mirror(image_t, boxes_t, landm_t)
-        height, width, _ = image_t.shape
+        height, width = image_t.shape[:2]
         image_t = _resize_subtract_mean(image_t, self.img_dim, self.rgb_means)
         boxes_t[:, 0::2] /= width
         boxes_t[:, 1::2] /= height
