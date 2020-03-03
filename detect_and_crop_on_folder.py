@@ -10,7 +10,9 @@ labels
     <file_name>.json
 """
 import argparse
+import json
 from pathlib import Path
+from typing import Tuple
 
 import cv2
 import numpy as np
@@ -24,12 +26,31 @@ from models.retinaface import RetinaFace
 from utils.box_utils import decode, decode_landm
 from utils.general import load_model
 from utils.nms.py_cpu_nms import py_cpu_nms
-import json
+
+
+def split_array(array_length: int, num_splits: int, split_id: int) -> Tuple[int, int]:
+    """Split array into parts.
+    Args:
+        array_length:
+        num_splits:
+        split_id:
+    Returns: start and end indices of the
+    """
+    if not 0 <= split_id < num_splits:
+        raise ValueError(f"gpu_id should be 0 <= {split_id} < {num_splits}")
+    if array_length % num_splits == 0:
+        step = int(array_length / num_splits)
+    else:
+        step = int(array_length / num_splits) + 1
+
+    return split_id * step, min((split_id + 1) * step, array_length)
 
 
 def get_args():
     parser = argparse.ArgumentParser(description="Retinaface")
     arg = parser.add_argument
+    arg("-g", "--gpu_id", type=int, help="GPU_id")
+    arg("--num_gpu", type=int, help="number of GPUs")
     arg(
         "-m",
         "--trained_model",
@@ -82,6 +103,10 @@ def main():
     net = net.to(device)
 
     file_paths = sorted(args.input_path.rglob("*.jpg"))
+
+    if args.num_gpu is not None:
+        start, end = split_array(len(file_paths), args.num_gpu, args.gpu_id)
+        file_paths = file_paths[start:end]
 
     output_path = args.output_path
 
@@ -204,6 +229,9 @@ def main():
                     target_folder.mkdir(exist_ok=True, parents=True)
 
                     crop_file_path = target_folder / f"{file_id}_{crop_id}.jpg"
+
+                    if crop_file_path.exist():
+                        continue
 
                     cv2.imwrite(
                         str(crop_file_path),
