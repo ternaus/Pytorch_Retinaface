@@ -66,8 +66,12 @@ def get_args():
     arg("-b", "--save_boxes", action="store_true", default=False, help="If we want to store bounding boxes.")
     arg("--origin_size", default=True, type=str, help="Whether use origin image size to evaluate")
     arg("--fp16", action="store_true", help="Whether use fp16")
-    arg("--batch_size", type=int, help="Size of the batch size. Use non 1 value only if you are sure that"
-                                       "all images are of the same size.", default=1)
+    arg(
+        "--batch_size",
+        type=int,
+        help="Size of the batch size. Use non 1 value only if you are sure that" "all images are of the same size.",
+        default=1,
+    )
     return parser.parse_args()
 
 
@@ -165,14 +169,17 @@ def main():
 
             labels = []
 
-            if args.batch_size == 1 and args.save_boxes and (
-                    output_label_path / f"{Path(image_paths[0]).stem}.json").exists():
+            if (
+                args.batch_size == 1
+                and args.save_boxes
+                and (output_label_path / f"{Path(image_paths[0]).stem}.json").exists()
+            ):
                 continue
 
             torched_images = torched_images.to(device)
 
             if args.fp16:
-                torched_image = torched_image.half()
+                torched_images = torched_images.half()
 
             loc, conf, land = net(torched_images)  # forward pass
 
