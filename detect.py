@@ -87,7 +87,7 @@ def main():
     resize = 1
 
     # testing begin
-    for i in range(100):
+    for _ in range(100):
         image_path = "./curve/test.jpg"
         img_raw = cv2.imread(image_path, cv2.IMREAD_COLOR)
 
