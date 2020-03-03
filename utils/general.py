@@ -1,4 +1,5 @@
 import torch
+from typing import Tuple
 
 
 def remove_prefix(state_dict, prefix):
@@ -41,3 +42,21 @@ def load_model(model, pretrained_path, load_to_cpu):
     check_keys(model, pretrained_dict)
     model.load_state_dict(pretrained_dict, strict=False)
     return model
+
+
+def split_array(array_length: int, num_splits: int, split_id: int) -> Tuple[int, int]:
+    """Split array into parts.
+    Args:
+        array_length:
+        num_splits:
+        split_id:
+    Returns: start and end indices of the
+    """
+    if not 0 <= split_id < num_splits:
+        raise ValueError(f"gpu_id should be 0 <= {split_id} < {num_splits}")
+    if array_length % num_splits == 0:
+        step = int(array_length / num_splits)
+    else:
+        step = int(array_length / num_splits) + 1
+
+    return split_id * step, min((split_id + 1) * step, array_length)
