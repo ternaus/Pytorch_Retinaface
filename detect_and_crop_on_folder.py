@@ -89,18 +89,19 @@ class InferenceDataset(Dataset):
         except JPEGRuntimeError:
             raw_image = load_rgb(image_path, lib="cv2")
 
-        image = raw_image.copy().astype(np.float32)
+        image = raw_image.astype(np.float32)
 
         # testing scale
         target_size = 1600
         max_size = 2150
         im_shape = image.shape
-        im_size_min = np.min(im_shape[0:2])
-        im_size_max = np.max(im_shape[0:2])
-        resize = float(target_size) / float(im_size_min)
+        image_size_min = np.min(im_shape[0:2])
+        image_size_max = np.max(im_shape[0:2])
+        resize = float(target_size) / float(image_size_min)
         # prevent bigger axis from being more than max_size:
-        if np.round(resize * im_size_max) > max_size:
-            resize = float(max_size) / float(im_size_max)
+        if np.round(resize * image_size_max) > max_size:
+            resize = float(max_size) / float(image_size_max)
+
         if self.origin_size:
             resize = 1
 
@@ -135,7 +136,7 @@ def main():
     device = torch.device("cpu" if args.cpu else "cuda")
     net = net.to(device)
 
-    file_paths = sorted(args.input_path.rglob("*.jpg"))[:1000]
+    file_paths = sorted(args.input_path.rglob("*.jpg"))
 
     if args.num_gpu is not None:
         start, end = split_array(len(file_paths), args.num_gpu, args.gpu_id)
