@@ -2,6 +2,7 @@ from __future__ import print_function
 
 import argparse
 import os
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -28,7 +29,7 @@ def get_args():
         help="Trained state_dict file path to open",
     )
     parser.add_argument("--network", default="mobile0.25", help="Backbone network mobile0.25 or resnet50")
-    parser.add_argument("--save_folder", default="eval/", type=str, help="Dir to save results")
+    parser.add_argument("--save_folder", default="eval/", type=Path, help="Dir to save results")
     parser.add_argument("--cpu", action="store_true", default=False, help="Use cpu inference")
     parser.add_argument("--dataset", default="FDDB", type=str, choices=["FDDB"], help="dataset")
     parser.add_argument("--confidence_threshold", default=0.02, type=float, help="confidence_threshold")
@@ -87,9 +88,8 @@ def main():
     device = torch.device("cpu" if args.cpu else "cuda")
     net = net.to(device)
 
-    # save file
-    if not os.path.exists(args.save_folder):
-        os.makedirs(args.save_folder)
+    args.save_folder.mkdir(exist_ok=True)
+
     fw = open(os.path.join(args.save_folder, args.dataset + "_dets.txt"), "w")
 
     # testing dataset

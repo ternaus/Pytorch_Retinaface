@@ -1,6 +1,6 @@
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 from torchvision.models import _utils
 
 from models.net import FPN
@@ -88,19 +88,22 @@ class RetinaFace(nn.Module):
         self.BboxHead = self._make_bbox_head(fpn_num=3, inchannels=cfg["out_channel"])
         self.LandmarkHead = self._make_landmark_head(fpn_num=3, inchannels=cfg["out_channel"])
 
-    def _make_class_head(self, fpn_num=3, inchannels=64, anchor_num=2):
+    @staticmethod
+    def _make_class_head(fpn_num: int = 3, inchannels: int = 64, anchor_num: int = 2):
         classhead = nn.ModuleList()
         for i in range(fpn_num):
             classhead.append(ClassHead(inchannels, anchor_num))
         return classhead
 
-    def _make_bbox_head(self, fpn_num=3, inchannels=64, anchor_num=2):
+    @staticmethod
+    def _make_bbox_head(fpn_num: int = 3, inchannels: int = 64, anchor_num: int = 2):
         bboxhead = nn.ModuleList()
         for i in range(fpn_num):
             bboxhead.append(BboxHead(inchannels, anchor_num))
         return bboxhead
 
-    def _make_landmark_head(self, fpn_num=3, inchannels=64, anchor_num=2):
+    @staticmethod
+    def _make_landmark_head(fpn_num: int = 3, inchannels: int = 64, anchor_num: int = 2):
         landmarkhead = nn.ModuleList()
         for i in range(fpn_num):
             landmarkhead.append(LandmarkHead(inchannels, anchor_num))
