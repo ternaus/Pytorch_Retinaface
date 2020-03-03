@@ -115,11 +115,6 @@ def prepare_image(image_path: (str, Path), origin_size, device):
     img = img.to(device)
     scale = scale.to(device)
 
-    im_height1, im_width1 = img.shape[2:]
-
-    assert im_height == im_height1
-    assert im_width == im_width1
-
     return img, scale, raw_image, resize
 
 
