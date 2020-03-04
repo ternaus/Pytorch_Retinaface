@@ -16,6 +16,7 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
+import albumentations as albu
 import cv2
 import numpy as np
 import torch
@@ -75,6 +76,7 @@ def get_args():
     arg("-b", "--save_boxes", action="store_true", default=False, help="If we want to store bounding boxes.")
     arg("--origin_size", default=True, type=str, help="Whether use origin image size to evaluate")
     arg("--fp16", action="store_true", help="Whether use fp16")
+    arg("-n", "--num_videos", type=int, help="Number of videos to use")
     arg(
         "--batch_size",
         type=int,
@@ -86,12 +88,11 @@ def get_args():
     return parser.parse_args()
 
 
-def prepare_frames(frames, fp16: bool):
+def prepare_frames(frames, fp16: bool, transform):
     result = []
 
     for frame in frames:
-        new_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32)
-        new_frame -= (104, 117, 123)
+        new_frame = transform(image=frame)["image"]
 
         result += [tensor_from_rgb_image(new_frame)]
 
@@ -129,7 +130,7 @@ def main():
     device = torch.device("cpu" if args.cpu else "cuda")
     net = net.to(device)
 
-    file_paths = sorted(args.input_path.rglob("*.mp4"))
+    file_paths = sorted(args.input_path.rglob("*.mp4"))[: args.num_videos]
 
     if args.num_gpu is not None:
         start, end = split_array(len(file_paths), args.num_gpu, args.gpu_id)
@@ -152,6 +153,8 @@ def main():
     else:
         raise NotImplementedError(f"Only CPU and GPU devices are supported by decard, but got {args.video_decoder}")
 
+    transform = albu.Compose([albu.Normalize(p=1, mean=(104, 117, 123), std=(1.0, 1.0, 1.0), max_pixel_value=1)], p=1)
+
     with torch.no_grad():
         for video_path in tqdm(file_paths):
             labels = []
@@ -163,7 +166,11 @@ def main():
                 if args.num_frames is None or args.num_frames == 1:
                     frame_ids = list(range(args.num_frames))
                 elif args.num_frames > 1:
-                    step = int(len_video / args.num_frames)
+                    if len_video < args.num_frames:
+                        step = 1
+                    else:
+                        step = int(len_video / args.num_frames)
+
                     frame_ids = list(range(0, len_video, step))[: args.num_frames]
                 else:
                     raise ValueError(f"Expect None or integer > 1 for args.num_frames, but got {args.num_frames}")
@@ -176,7 +183,7 @@ def main():
 
             num_frames = len(frames)
 
-            torched_frames = prepare_frames(frames, args.fp16)
+            torched_frames = prepare_frames(frames, args.fp16, transform)
 
             torched_frames = torched_frames.to(device)
 

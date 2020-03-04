@@ -1,16 +1,19 @@
 """
-This script detects faces in images, crop them and save to disk.
+This script detects faces in frames in videos, crops them and saves to disk.
 Input:
-<file_path_1>.jpg, <file_path_2>.jpg
+<video_id>.jpg, <video_id>.jpg
+
 Result:
+
 images
-    <file_name>
-        <file_name>_<crop_id>.jpg
+    <video_id>
+        <video_id>_<frame_id>_<crop_id>.jpg
 labels
-    <file_name>.json
+    <video_id>.json
 """
 import argparse
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import albumentations as albu
@@ -18,18 +21,27 @@ import cv2
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
-from iglovikov_helper_functions.utils.img_tools import load_rgb
-from jpeg4py import JPEGRuntimeError
+from decord import VideoReader, cpu, gpu
 from pytorch_toolbelt.utils.torch_utils import tensor_from_rgb_image
-from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from data import cfg_mnet, cfg_re50
 from layers.functions.prior_box import PriorBox
 from models.retinaface import RetinaFace
 from utils.box_utils import decode, decode_landm
-from utils.general import load_model, split_array
+from utils.general import load_model
+from utils.general import split_array
 from utils.nms.py_cpu_nms import py_cpu_nms
+
+
+@contextmanager
+def video_reader(*args, **kwds):
+    # Code to acquire resource, e.g.:
+    resource = VideoReader(*args, **kwds)
+    try:
+        yield resource
+    finally:
+        del resource
 
 
 def get_args():
@@ -52,67 +64,34 @@ def get_args():
         help="Path where results will be saved: " "images folder for images and" "labels folder for bounding boxes",
         required=True,
     )
-    arg("--network", default="resnet50", help="Backbone network mobile0.25 or resnet50")
+    arg(
+        "--network",
+        default="resnet50",
+        help="Backbone network mobile0.25 or resnet50",
+        choices=["resnet50", "mobile0.25"],
+    )
     arg("--cpu", action="store_true", default=False, help="Use cpu inference")
     arg("-c", "--confidence_threshold", default=0.7, type=float, help="confidence_threshold")
     arg("--top_k", default=5000, type=int, help="top_k")
     arg("--nms_threshold", default=0.4, type=float, help="nms_threshold")
     arg("--keep_top_k", default=750, type=int, help="keep_top_k")
 
-    arg("-j", "--num_workers", type=int, help="Number of CPU threads", default=64)
     arg("-s", "--save_crops", action="store_true", default=False, help="If we want to store crops.")
     arg("-b", "--save_boxes", action="store_true", default=False, help="If we want to store bounding boxes.")
     arg("--origin_size", default=True, type=str, help="Whether use origin image size to evaluate")
     arg("--fp16", action="store_true", help="Whether use fp16")
-    arg(
-        "--batch_size",
-        type=int,
-        help="Size of the batch size. Use non 1 value only if you are sure that" "all images are of the same size.",
-        default=1,
-    )
+    arg("-n", "--num_videos", type=int, help="Number of videos to use")
+
+    arg("-v", "--video_decoder", type=str, help="Where to decode videos.", choices=["cpu", "gpu"], default="cpu")
+    arg("-f", "--num_frames", type=int, help="Number of frames to extract")
     return parser.parse_args()
 
 
-class InferenceDataset(Dataset):
-    def __init__(self, file_paths, origin_size, transform):
-        self.file_paths = file_paths
-        self.transform = transform
-
-        self.origin_size = origin_size
-
-    def __len__(self) -> int:
-
-        return len(self.file_paths)
-
-    def __getitem__(self, idx):
-        image_path = self.file_paths[idx]
-
-        try:
-            raw_image = load_rgb(image_path, lib="jpeg4py")
-        except JPEGRuntimeError:
-            raw_image = load_rgb(image_path, lib="cv2")
-
-        image = raw_image.astype(np.float32)
-
-        if self.origin_size:
-            resize = 1
-        else:
-            # testing scale
-            target_size = 1600
-            max_size = 2150
-            im_shape = image.shape
-            image_size_min = np.min(im_shape[0:2])
-            image_size_max = np.max(im_shape[0:2])
-            resize = float(target_size) / float(image_size_min)
-            # prevent bigger axis from being more than max_size:
-            if np.round(resize * image_size_max) > max_size:
-                resize = float(max_size) / float(image_size_max)
-
-            image = cv2.resize(image, None, None, fx=resize, fy=resize, interpolation=cv2.INTER_LINEAR)
-
-        image = self.transform(image=image)["image"]
-
-        return tensor_from_rgb_image(image), raw_image, resize, str(image_path)
+def prepare_image(raw_frame: np.array, transform):
+    frame = raw_frame.astype(np.float32)
+    new_frame = transform(image=frame)["image"]
+    new_frame = tensor_from_rgb_image(new_frame)
+    return new_frame.unsqueeze(0)
 
 
 def main():
@@ -138,7 +117,7 @@ def main():
     device = torch.device("cpu" if args.cpu else "cuda")
     net = net.to(device)
 
-    file_paths = sorted(args.input_path.rglob("*.jpg"))
+    file_paths = sorted(args.input_path.rglob("*.mp4"))[: args.num_videos]
 
     if args.num_gpu is not None:
         start, end = split_array(len(file_paths), args.num_gpu, args.gpu_id)
@@ -154,38 +133,45 @@ def main():
         output_image_path = output_path / "images"
         output_image_path.mkdir(exist_ok=True, parents=True)
 
+    if args.video_decoder == "cpu":
+        decode_device = cpu(0)
+    elif args.video_decoder == "gpu":
+        decode_device = gpu(0)
+    else:
+        raise NotImplementedError(f"Only CPU and GPU devices are supported by decard, but got {args.video_decoder}")
+
     transform = albu.Compose([albu.Normalize(p=1, mean=(104, 117, 123), std=(1.0, 1.0, 1.0), max_pixel_value=1)], p=1)
 
-    test_loader = DataLoader(
-        InferenceDataset(file_paths, args.origin_size, transform=transform),
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=False,
-    )
-
     with torch.no_grad():
-        for torched_images, raw_images, resizes, image_paths in tqdm(test_loader):
-
+        for video_path in tqdm(file_paths):
             labels = []
+            video_id = video_path.stem
 
-            if (
-                args.batch_size == 1
-                and args.save_boxes
-                and (output_label_path / f"{Path(image_paths[0]).stem}.json").exists()
-            ):
-                continue
+            with video_reader(str(video_path), ctx=decode_device) as video:
+                len_video = len(video)
 
-            torched_images = torched_images.to(device)
+                if args.num_frames is None or args.num_frames == 1:
+                    frame_ids = list(range(args.num_frames))
+                elif args.num_frames > 1:
+                    if len_video < args.num_frames:
+                        step = 1
+                    else:
+                        step = int(len_video / args.num_frames)
 
-            if args.fp16:
-                torched_images = torched_images.half()
+                    frame_ids = list(range(0, len_video, step))[: args.num_frames]
+                else:
+                    raise ValueError(f"Expect None or integer > 1 for args.num_frames, but got {args.num_frames}")
 
-            loc, conf, land = net(torched_images)  # forward pass
+                frames = video.get_batch(frame_ids).asnumpy()
 
-            batch_size = torched_images.shape[0]
+                if args.video_decoder == "gpu":
+                    del video
+                    torch.cuda.empty_cache()
 
-            image_height, image_width = torched_images.shape[2:]
+            num_frames = len(frames)
+
+            image_height = frames.shape[1]
+            image_width = frames.shape[2]
 
             scale1 = torch.Tensor(
                 [
@@ -212,23 +198,28 @@ def main():
             priors = priors.to(device)
             prior_data = priors.data
 
-            for batch_id in range(batch_size):
-                image_path = image_paths[batch_id]
-                file_id = Path(image_path).stem
-                raw_image = raw_images[batch_id]
+            for pred_id in range(num_frames):
+                frame = frames[pred_id]
 
-                resize = resizes[batch_id].float()
+                torched_image = prepare_image(frame, transform).to(device)
 
-                boxes = decode(loc.data[batch_id], prior_data, cfg["variance"])
+                if args.fp16:
+                    torched_image = torched_image.half()
 
-                boxes = boxes * scale / resize
+                loc, conf, land = net(torched_image)  # forward pass
+
+                frame_id = frame_ids[pred_id]
+
+                boxes = decode(loc.data[0], prior_data, cfg["variance"])
+
+                boxes *= scale
 
                 boxes = boxes.cpu().numpy()
-                scores = conf[batch_id].data.cpu().numpy()[:, 1]
+                scores = conf[0].data.cpu().numpy()[:, 1]
 
-                landmarks = decode_landm(land.data[batch_id], prior_data, cfg["variance"])
+                landmarks = decode_landm(land.data[0], prior_data, cfg["variance"])
 
-                landmarks = landmarks * scale1 / resize
+                landmarks *= scale1
                 landmarks = landmarks.cpu().numpy()
 
                 # ignore low scores
@@ -251,6 +242,7 @@ def main():
 
                 # x_min, y_min, x_max, y_max, score
                 detection = detection[keep, :]
+
                 landmarks = landmarks[keep].astype(int)
 
                 if detection.shape[0] == 0:
@@ -271,12 +263,12 @@ def main():
                         x_min = max(0, x_min)
                         y_min = max(0, y_min)
 
-                        crop = raw_image[y_min:y_max, x_min:x_max].cpu().numpy()
+                        crop = frame[y_min:y_max, x_min:x_max]
 
-                        target_folder = output_image_path / f"{file_id}"
+                        target_folder = output_image_path / f"{video_id}"
                         target_folder.mkdir(exist_ok=True, parents=True)
 
-                        crop_file_path = target_folder / f"{file_id}_{crop_id}.jpg"
+                        crop_file_path = target_folder / f"{frame_id}_{crop_id}.jpg"
 
                         if crop_file_path.exists():
                             continue
@@ -289,13 +281,13 @@ def main():
 
                 if args.save_boxes:
                     result = {
-                        "file_path": image_path,
-                        "file_id": file_id,
+                        "file_path": str(video_path),
+                        "file_id": video_id,
                         "bboxes": labels,
                         "landmarks": landmarks[crop_id].tolist(),
                     }
 
-                    with open(output_label_path / f"{file_id}.json", "w") as f:
+                    with open(output_label_path / f"{video_id}.json", "w") as f:
                         json.dump(result, f, indent=2)
 
 
