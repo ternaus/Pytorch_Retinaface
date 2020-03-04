@@ -21,16 +21,16 @@ import torch.backends.cudnn as cudnn
 from iglovikov_helper_functions.utils.img_tools import load_rgb
 from jpeg4py import JPEGRuntimeError
 from pytorch_toolbelt.utils.torch_utils import tensor_from_rgb_image
-from torch.utils.data import DataLoader
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
+
 from tqdm import tqdm
 
 from data import cfg_mnet, cfg_re50
 from layers.functions.prior_box import PriorBox
 from models.retinaface import RetinaFace
 from utils.box_utils import decode, decode_landm
-from utils.general import load_model
-from utils.general import split_array
+from utils.general import load_model, split_array
+
 from utils.nms.py_cpu_nms import py_cpu_nms
 
 
@@ -185,29 +185,29 @@ def main():
 
             batch_size = torched_images.shape[0]
 
-            im_height, im_width = torched_images.shape[2:]
+            image_height, image_width = torched_images.shape[2:]
 
             scale1 = torch.Tensor(
                 [
-                    im_width,
-                    im_height,
-                    im_width,
-                    im_height,
-                    im_width,
-                    im_height,
-                    im_width,
-                    im_height,
-                    im_width,
-                    im_height,
+                    image_width,
+                    image_height,
+                    image_width,
+                    image_height,
+                    image_width,
+                    image_height,
+                    image_width,
+                    image_height,
+                    image_width,
+                    image_height,
                 ]
             )
 
             scale1 = scale1.to(device)
 
-            scale = torch.Tensor([im_width, im_height, im_width, im_height])
+            scale = torch.Tensor([image_width, image_height, image_width, image_height])
             scale = scale.to(device)
 
-            priorbox = PriorBox(cfg, image_size=(im_height, im_width))
+            priorbox = PriorBox(cfg, image_size=(image_height, image_width))
             priors = priorbox.forward()
             priors = priors.to(device)
             prior_data = priors.data
