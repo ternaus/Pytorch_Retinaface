@@ -16,7 +16,6 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
-import albumentations as albu
 import cv2
 import numpy as np
 import torch
@@ -87,13 +86,12 @@ def get_args():
     return parser.parse_args()
 
 
-def prepare_frames(frames, normalization, fp16: bool):
+def prepare_frames(frames, fp16: bool):
     result = []
 
     for frame in frames:
         new_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32)
         new_frame -= (104, 117, 123)
-        # new_frame = normalization(image=new_frame)['image']
 
         result += [tensor_from_rgb_image(new_frame)]
 
@@ -130,8 +128,6 @@ def main():
     cudnn.benchmark = True
     device = torch.device("cpu" if args.cpu else "cuda")
     net = net.to(device)
-
-    normalization = albu.Compose([albu.Normalize(p=1)], p=1)
 
     file_paths = sorted(args.input_path.rglob("*.mp4"))
 
@@ -180,7 +176,7 @@ def main():
 
             num_frames = len(frames)
 
-            torched_frames = prepare_frames(frames, normalization, args.fp16)
+            torched_frames = prepare_frames(frames, args.fp16)
 
             torched_frames = torched_frames.to(device)
 
