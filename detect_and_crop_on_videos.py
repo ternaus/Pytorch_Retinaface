@@ -25,7 +25,7 @@ from decord import VideoReader, cpu, gpu
 from pytorch_toolbelt.utils.torch_utils import tensor_from_rgb_image
 from tqdm import tqdm
 
-from data import cfg_mnet, cfg_re50
+from data import cfg_mnet_test, cfg_re50_test
 from layers.functions.prior_box import PriorBox
 from models.retinaface import RetinaFace
 from utils.box_utils import decode, decode_landm
@@ -89,7 +89,6 @@ def get_args():
     return parser.parse_args()
 
 
-
 def prepare_frames(frames, fp16: bool, transform, resize_coeff=None):
     if resize_coeff is not None:
         target_size = min(resize_coeff)
@@ -133,9 +132,9 @@ def main():
     torch.set_grad_enabled(False)
 
     if args.network == "mobile0.25":
-        cfg = cfg_mnet
+        cfg = cfg_mnet_test
     elif args.network == "resnet50":
-        cfg = cfg_re50
+        cfg = cfg_re50_test
     else:
         raise NotImplementedError(f"Only mobile0.25 and resnet50 are suppoted.")
 
