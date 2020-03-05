@@ -85,13 +85,34 @@ def get_args():
     )
     arg("-v", "--video_decoder", type=str, help="Where to decode videos.", choices=["cpu", "gpu"], default="cpu")
     arg("-f", "--num_frames", type=int, help="Number of frames to extract")
+    arg("--resize_coeff", nargs=2, help="min and max sizes for images", type=int, default=[1080, 1920])
     return parser.parse_args()
 
 
-def prepare_frames(frames, fp16: bool, transform):
+
+def prepare_frames(frames, fp16: bool, transform, resize_coeff=None):
+    if resize_coeff is not None:
+        target_size = min(resize_coeff)
+        max_size = max(resize_coeff)
+
+        image_height = frames.shape[1]
+        image_width = frames.shape[2]
+
+        image_size_min = min([image_width, image_height])
+        image_size_max = max([image_width, image_height])
+
+        resize = float(target_size) / float(image_size_min)
+        if np.round(resize * image_size_max) > max_size:
+            resize = float(max_size) / float(image_size_max)
+    else:
+        resize = 1
+
     result = []
 
     for frame in frames:
+        if resize_coeff is not None and resize != 1:
+            frame = cv2.resize(frame, None, None, fx=resize, fy=resize, interpolation=cv2.INTER_LINEAR)
+
         new_frame = transform(image=frame)["image"]
 
         result += [tensor_from_rgb_image(new_frame)]
@@ -104,7 +125,7 @@ def prepare_frames(frames, fp16: bool, transform):
     if fp16:
         result = result.half()
 
-    return result
+    return result, resize
 
 
 def main():
@@ -183,7 +204,7 @@ def main():
 
             num_frames = len(frames)
 
-            torched_frames = prepare_frames(frames, args.fp16, transform)
+            torched_frames, resize = prepare_frames(frames, args.fp16, transform, args.resize_coeff)
 
             torched_frames = torched_frames.to(device)
 
@@ -225,14 +246,14 @@ def main():
 
                     boxes = decode(loc.data[pred_id], prior_data, cfg["variance"])
 
-                    boxes *= scale
+                    boxes *= scale / resize
 
                     boxes = boxes.cpu().numpy()
                     scores = conf[pred_id].data.cpu().numpy()[:, 1]
 
                     landmarks = decode_landm(land.data[pred_id], prior_data, cfg["variance"])
 
-                    landmarks *= scale1
+                    landmarks *= scale1 / resize
                     landmarks = landmarks.cpu().numpy()
 
                     # ignore low scores
