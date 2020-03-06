@@ -13,16 +13,19 @@ labels
 """
 import argparse
 import json
-from contextlib import contextmanager
 from pathlib import Path
+from typing import Union, List
 
 import albumentations as albu
 import cv2
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
-from decord import VideoReader, cpu, gpu
+from catalyst.dl import SupervisedRunner
+from catalyst.dl.utils import process_components
+from decord import VideoReader, cpu
 from pytorch_toolbelt.utils.torch_utils import tensor_from_rgb_image
+from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
 from data import cfg_mnet_test, cfg_re50_test
@@ -32,16 +35,6 @@ from utils.box_utils import decode, decode_landm
 from utils.general import load_model
 from utils.general import split_array
 from utils.nms.py_cpu_nms import py_cpu_nms
-
-
-@contextmanager
-def video_reader(*args, **kwds):
-    # Code to acquire resource, e.g.:
-    resource = VideoReader(*args, **kwds)
-    try:
-        yield resource
-    finally:
-        del resource
 
 
 def get_args():
@@ -85,46 +78,93 @@ def get_args():
     )
     arg("-v", "--video_decoder", type=str, help="Where to decode videos.", choices=["cpu", "gpu"], default="cpu")
     arg("-f", "--num_frames", type=int, help="Number of frames to extract")
-    arg("--resize_coeff", nargs=2, help="min and max sizes for images", type=int, default=[1080, 1920])
+    arg("--resize_coeff", nargs=2, help="min and max sizes for images", type=int, default=[1600, 2150])
     return parser.parse_args()
 
 
-def prepare_frames(frames, fp16: bool, transform, resize_coeff=None):
-    if resize_coeff is not None:
-        target_size = min(resize_coeff)
-        max_size = max(resize_coeff)
+class InferenceDataset(Dataset):
+    def __init__(
+        self,
+        video_paths: List[Path],
+        num_frames: Union[int, None],
+        transform: albu.Compose,
+        resize_coeff: Union[tuple, None],
+    ):
+        self.video_paths = video_paths
+        self.num_frames = num_frames
+        self.transform = transform
+        self.resize_coeff = resize_coeff
 
-        image_height = frames.shape[1]
-        image_width = frames.shape[2]
+    def __len__(self):
+        return len(self.video_paths)
 
-        image_size_min = min([image_width, image_height])
-        image_size_max = max([image_width, image_height])
+    def __getitem__(self, idx):
+        video_path = self.video_paths[idx]
 
-        resize = float(target_size) / float(image_size_min)
-        if np.round(resize * image_size_max) > max_size:
-            resize = float(max_size) / float(image_size_max)
-    else:
-        resize = 1
+        video = VideoReader(str(video_path), ctx=cpu(0))
+        len_video = len(video)
 
-    result = []
+        if self.num_frames is None or self.num_frames == 1:
+            frame_ids = list(range(len_video))
+        elif self.num_frames > 1:
+            if len_video < self.num_frames:
+                step = 1
+            else:
+                step = int(len_video / self.num_frames)
 
-    for frame in frames:
-        if resize_coeff is not None and resize != 1:
-            frame = cv2.resize(frame, None, None, fx=resize, fy=resize, interpolation=cv2.INTER_LINEAR)
+            frame_ids = list(range(0, len_video, step))[: self.num_frames]
+        else:
+            raise ValueError(f"Expect None or integer > 1 for args.num_frames, but got {self.num_frames}")
 
-        new_frame = transform(image=frame)["image"]
+        frames = video.get_batch(frame_ids).asnumpy()
 
-        result += [tensor_from_rgb_image(new_frame)]
+        del video
 
-    if len(result) != 1:
-        result = torch.stack(result)
-    else:
-        result = torch.unsqueeze(result[0], 0)
+        torched_frames, resize = self.prepare_frames(frames)
 
-    if fp16:
-        result = result.half()
+        result = {
+            "torched_frames": torched_frames,
+            "resize": resize,
+            "video_path": str(video_path),
+            "frame_ids": np.array(frame_ids),
+            "frames": frames,
+        }
 
-    return result, resize
+        return result
+
+    def prepare_frames(self, frames):
+        if self.resize_coeff is not None:
+            target_size = min(self.resize_coeff)
+            max_size = max(self.resize_coeff)
+
+            image_height = frames.shape[1]
+            image_width = frames.shape[2]
+
+            image_size_min = min([image_width, image_height])
+            image_size_max = max([image_width, image_height])
+
+            resize = float(target_size) / float(image_size_min)
+            if np.round(resize * image_size_max) > max_size:
+                resize = float(max_size) / float(image_size_max)
+        else:
+            resize = 1
+
+        result = []
+
+        for frame in frames:
+            if self.resize_coeff is not None and resize != 1:
+                frame = cv2.resize(frame, None, None, fx=resize, fy=resize, interpolation=cv2.INTER_LINEAR)
+
+            new_frame = self.transform(image=frame)["image"]
+
+            result += [tensor_from_rgb_image(new_frame)]
+
+        if len(result) != 1:
+            result = torch.stack(result)
+        else:
+            result = torch.unsqueeze(result[0], 0)
+
+        return result, resize
 
 
 def main():
@@ -139,22 +179,32 @@ def main():
         raise NotImplementedError(f"Only mobile0.25 and resnet50 are suppoted.")
 
     # net and model
-    net = RetinaFace(cfg=cfg, phase="test")
-    net = load_model(net, args.trained_model, args.cpu)
-    net.eval()
-    if args.fp16:
-        net = net.half()
+    model = RetinaFace(cfg=cfg, phase="test")
+    model = load_model(model, args.trained_model, args.cpu)
+    model.eval()
+
+    net, _, _, _, device = process_components(model=model)
+
+    runner = SupervisedRunner(model=model, device=device, output_key="preds")
 
     print("Finished loading model!")
     cudnn.benchmark = True
-    device = torch.device("cpu" if args.cpu else "cuda")
-    net = net.to(device)
 
     file_paths = sorted(args.input_path.rglob("*.mp4"))[: args.num_videos]
+
+    transform = albu.Compose([albu.Normalize(p=1, mean=(104, 117, 123), std=(1.0, 1.0, 1.0), max_pixel_value=1)], p=1)
 
     if args.num_gpu is not None:
         start, end = split_array(len(file_paths), args.num_gpu, args.gpu_id)
         file_paths = file_paths[start:end]
+
+    test_loader = DataLoader(
+        InferenceDataset(file_paths, args.num_frames, transform=transform, resize_coeff=args.resize_coeff),
+        batch_size=1,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
 
     output_path = args.output_path
 
@@ -166,46 +216,20 @@ def main():
         output_image_path = output_path / "images"
         output_image_path.mkdir(exist_ok=True, parents=True)
 
-    if args.video_decoder == "cpu":
-        decode_device = cpu(0)
-    elif args.video_decoder == "gpu":
-        decode_device = gpu(0)
-    else:
-        raise NotImplementedError(f"Only CPU and GPU devices are supported by decard, but got {args.video_decoder}")
-
-    transform = albu.Compose([albu.Normalize(p=1, mean=(104, 117, 123), std=(1.0, 1.0, 1.0), max_pixel_value=1)], p=1)
-
     with torch.no_grad():
-        for video_path in tqdm(file_paths):
-            labels = []
+        for raw_input in tqdm(test_loader):
+            torched_frames = raw_input["torched_frames"][0]
+
+            resize = raw_input["resize"][0]
+            video_path = Path(raw_input["video_path"][0])
+            frame_ids = raw_input["frame_ids"][0].numpy()
+            frames = raw_input["frames"][0]
+
+            num_frames = torched_frames.shape[0]
+
             video_id = video_path.stem
 
-            with video_reader(str(video_path), ctx=decode_device) as video:
-                len_video = len(video)
-
-                if args.num_frames is None or args.num_frames == 1:
-                    frame_ids = list(range(args.num_frames))
-                elif args.num_frames > 1:
-                    if len_video < args.num_frames:
-                        step = 1
-                    else:
-                        step = int(len_video / args.num_frames)
-
-                    frame_ids = list(range(0, len_video, step))[: args.num_frames]
-                else:
-                    raise ValueError(f"Expect None or integer > 1 for args.num_frames, but got {args.num_frames}")
-
-                frames = video.get_batch(frame_ids).asnumpy()
-
-                if args.video_decoder == "gpu":
-                    del video
-                    torch.cuda.empty_cache()
-
-            num_frames = len(frames)
-
-            torched_frames, resize = prepare_frames(frames, args.fp16, transform, args.resize_coeff)
-
-            torched_frames = torched_frames.to(device)
+            labels = []
 
             image_height, image_width = torched_frames.shape[2:]
 
@@ -236,7 +260,10 @@ def main():
 
             for start_index in range(0, num_frames, args.batch_size):
                 end_index = min(start_index + args.batch_size, num_frames)
-                loc, conf, land = net(torched_frames[start_index:end_index])  # forward pass
+
+                loc, conf, land = runner.predict_batch({"features": torched_frames[start_index:end_index].to(device)})[
+                    "preds"
+                ]
 
                 batch_size = loc.shape[0]
 
@@ -296,7 +323,7 @@ def main():
                             x_min = max(0, x_min)
                             y_min = max(0, y_min)
 
-                            crop = frames[batch_size][y_min:y_max, x_min:x_max]
+                            crop = frames[pred_id][y_min:y_max, x_min:x_max]
 
                             target_folder = output_image_path / f"{video_id}"
                             target_folder.mkdir(exist_ok=True, parents=True)
@@ -308,7 +335,7 @@ def main():
 
                             cv2.imwrite(
                                 str(crop_file_path),
-                                cv2.cvtColor(crop, cv2.COLOR_BGR2RGB),
+                                cv2.cvtColor(crop.numpy(), cv2.COLOR_BGR2RGB),
                                 [int(cv2.IMWRITE_JPEG_QUALITY), 90],
                             )
 

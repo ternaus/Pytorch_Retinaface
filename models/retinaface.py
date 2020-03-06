@@ -10,7 +10,7 @@ from models.net import SSH
 
 class ClassHead(nn.Module):
     def __init__(self, inchannels=512, num_anchors=3):
-        super(ClassHead, self).__init__()
+        super().__init__()
         self.num_anchors = num_anchors
         self.conv1x1 = nn.Conv2d(inchannels, self.num_anchors * 2, kernel_size=(1, 1), stride=1, padding=0)
 
@@ -23,7 +23,7 @@ class ClassHead(nn.Module):
 
 class BboxHead(nn.Module):
     def __init__(self, inchannels=512, num_anchors=3):
-        super(BboxHead, self).__init__()
+        super().__init__()
         self.conv1x1 = nn.Conv2d(inchannels, num_anchors * 4, kernel_size=(1, 1), stride=1, padding=0)
 
     def forward(self, x):
@@ -35,7 +35,7 @@ class BboxHead(nn.Module):
 
 class LandmarkHead(nn.Module):
     def __init__(self, inchannels=512, num_anchors=3):
-        super(LandmarkHead, self).__init__()
+        super().__init__()
         self.conv1x1 = nn.Conv2d(inchannels, num_anchors * 10, kernel_size=(1, 1), stride=1, padding=0)
 
     def forward(self, x):
@@ -51,7 +51,7 @@ class RetinaFace(nn.Module):
         :param cfg:  Network related settings.
         :param phase: train or test.
         """
-        super(RetinaFace, self).__init__()
+        super().__init__()
         self.phase = phase
         backbone = None
         if cfg["name"] == "mobilenet0.25":
@@ -89,21 +89,21 @@ class RetinaFace(nn.Module):
         self.LandmarkHead = self._make_landmark_head(fpn_num=3, inchannels=cfg["out_channel"])
 
     @staticmethod
-    def _make_class_head(fpn_num: int = 3, inchannels: int = 64, anchor_num: int = 2):
+    def _make_class_head(fpn_num: int = 3, inchannels: int = 64, anchor_num: int = 2) -> nn.ModuleList:
         classhead = nn.ModuleList()
         for i in range(fpn_num):
             classhead.append(ClassHead(inchannels, anchor_num))
         return classhead
 
     @staticmethod
-    def _make_bbox_head(fpn_num: int = 3, inchannels: int = 64, anchor_num: int = 2):
+    def _make_bbox_head(fpn_num: int = 3, inchannels: int = 64, anchor_num: int = 2) -> nn.ModuleList:
         bboxhead = nn.ModuleList()
         for i in range(fpn_num):
             bboxhead.append(BboxHead(inchannels, anchor_num))
         return bboxhead
 
     @staticmethod
-    def _make_landmark_head(fpn_num: int = 3, inchannels: int = 64, anchor_num: int = 2):
+    def _make_landmark_head(fpn_num: int = 3, inchannels: int = 64, anchor_num: int = 2) -> nn.ModuleList:
         landmarkhead = nn.ModuleList()
         for i in range(fpn_num):
             landmarkhead.append(LandmarkHead(inchannels, anchor_num))

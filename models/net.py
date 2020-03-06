@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from torch import nn
 
 
-def conv_bn(inp, oup, stride=1, leaky: float = 0):
+def conv_bn(inp: int, oup: int, stride: int = 1, leaky: float = 0) -> nn.Sequential:
     return nn.Sequential(
         nn.Conv2d(inp, oup, 3, stride, 1, bias=False),
         nn.BatchNorm2d(oup),
@@ -11,11 +11,11 @@ def conv_bn(inp, oup, stride=1, leaky: float = 0):
     )
 
 
-def conv_bn_no_relu(inp, oup, stride):
+def conv_bn_no_relu(inp: int, oup: int, stride: int) -> nn.Sequential:
     return nn.Sequential(nn.Conv2d(inp, oup, 3, stride, 1, bias=False), nn.BatchNorm2d(oup),)
 
 
-def conv_bn1X1(inp, oup, stride, leaky: float = 0):
+def conv_bn1X1(inp: int, oup: int, stride: int, leaky: float = 0) -> nn.Sequential:
     return nn.Sequential(
         nn.Conv2d(inp, oup, 1, stride, padding=0, bias=False),
         nn.BatchNorm2d(oup),
@@ -23,7 +23,7 @@ def conv_bn1X1(inp, oup, stride, leaky: float = 0):
     )
 
 
-def conv_dw(inp, oup, stride, leaky: float = 0.1):
+def conv_dw(inp: int, oup: int, stride: int, leaky: float = 0.1) -> nn.Sequential:
     return nn.Sequential(
         nn.Conv2d(inp, inp, 3, stride, 1, groups=inp, bias=False),
         nn.BatchNorm2d(inp),
@@ -35,10 +35,10 @@ def conv_dw(inp, oup, stride, leaky: float = 0.1):
 
 
 class SSH(nn.Module):
-    def __init__(self, in_channel, out_channel):
-        super(SSH, self).__init__()
+    def __init__(self, in_channel: int, out_channel: int):
+        super().__init__()
         assert out_channel % 4 == 0
-        leaky = 0
+        leaky: float = 0
         if out_channel <= 64:
             leaky = 0.1
         self.conv3X3 = conv_bn_no_relu(in_channel, out_channel // 2, stride=1)
@@ -65,7 +65,7 @@ class SSH(nn.Module):
 
 class FPN(nn.Module):
     def __init__(self, in_channels_list, out_channels):
-        super(FPN, self).__init__()
+        super().__init__()
         leaky = 0
         if out_channels <= 64:
             leaky = 0.1
@@ -76,7 +76,7 @@ class FPN(nn.Module):
         self.merge1 = conv_bn(out_channels, out_channels, leaky=leaky)
         self.merge2 = conv_bn(out_channels, out_channels, leaky=leaky)
 
-    def forward(self, input):
+    def forward(self, input: torch.tensor) -> torch.tensor:
         # names = list(input.keys())
         input = list(input.values())
 
@@ -98,7 +98,7 @@ class FPN(nn.Module):
 
 class MobileNetV1(nn.Module):
     def __init__(self):
-        super(MobileNetV1, self).__init__()
+        super().__init__()
         self.stage1 = nn.Sequential(
             conv_bn(3, 8, 2, leaky=0.1),  # 3
             conv_dw(8, 16, 1),  # 7
