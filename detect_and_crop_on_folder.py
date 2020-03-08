@@ -22,6 +22,7 @@ from iglovikov_helper_functions.utils.img_tools import load_rgb
 from jpeg4py import JPEGRuntimeError
 from pytorch_toolbelt.utils.torch_utils import tensor_from_rgb_image
 from torch.utils.data import DataLoader, Dataset
+from torchvision.ops import nms
 from tqdm import tqdm
 
 from data import cfg_mnet, cfg_re50
@@ -29,7 +30,6 @@ from layers.functions.prior_box import PriorBox
 from models.retinaface import RetinaFace
 from utils.box_utils import decode, decode_landm
 from utils.general import load_model, split_array
-from utils.nms.py_cpu_nms import py_cpu_nms
 
 
 def get_args():
@@ -112,7 +112,12 @@ class InferenceDataset(Dataset):
 
         image = self.transform(image=image)["image"]
 
-        return tensor_from_rgb_image(image), raw_image, resize, str(image_path)
+        return {
+            "torched_image": tensor_from_rgb_image(image),
+            "resize": resize,
+            "raw_image": raw_image,
+            "image_path": str(image_path),
+        }
 
 
 def main():
@@ -165,7 +170,15 @@ def main():
     )
 
     with torch.no_grad():
-        for torched_images, raw_images, resizes, image_paths in tqdm(test_loader):
+        for raw_input in tqdm(test_loader):
+            torched_images = raw_input["torched_image"]
+
+            if args.fp16:
+                torched_images = torched_images.half()
+
+            resizes = raw_input["resize"]
+            image_paths = Path(raw_input["image_path"])
+            raw_images = raw_input["raw_image"]
 
             labels = []
 
@@ -176,12 +189,7 @@ def main():
             ):
                 continue
 
-            torched_images = torched_images.to(device)
-
-            if args.fp16:
-                torched_images = torched_images.half()
-
-            loc, conf, land = net(torched_images)  # forward pass
+            loc, conf, land = net(torched_images.to(device))  # forward pass
 
             batch_size = torched_images.shape[0]
 
@@ -221,49 +229,47 @@ def main():
 
                 boxes = decode(loc.data[batch_id], prior_data, cfg["variance"])
 
-                boxes = boxes * scale / resize
-
-                boxes = boxes.cpu().numpy()
-                scores = conf[batch_id].data.cpu().numpy()[:, 1]
+                boxes *= scale / resize
+                scores = conf[batch_id][:, 1]
 
                 landmarks = decode_landm(land.data[batch_id], prior_data, cfg["variance"])
-
-                landmarks = landmarks * scale1 / resize
-                landmarks = landmarks.cpu().numpy()
+                landmarks *= scale1 / resize
 
                 # ignore low scores
-                valid_index = np.where(scores > args.confidence_threshold)[0]
+                valid_index = torch.where(scores > args.confidence_threshold)[0]
                 boxes = boxes[valid_index]
                 landmarks = landmarks[valid_index]
                 scores = scores[valid_index]
 
-                # keep top-K before NMS
-                order = scores.argsort()[::-1]
-                # order = scores.argsort()[::-1][:args.top_k]
+                order = scores.argsort(descending=True)
+
                 boxes = boxes[order]
                 landmarks = landmarks[order]
                 scores = scores[order]
 
                 # do NMS
-                detection = np.hstack((boxes, scores[:, np.newaxis])).astype(np.float32, copy=False)
-                keep = py_cpu_nms(detection, args.nms_threshold)
-                # keep = nms(detection, args.nms_threshold,force_cpu=args.cpu)
+                keep = nms(boxes, scores, args.nms_threshold)
+                boxes = boxes[keep, :].int()
 
-                # x_min, y_min, x_max, y_max, score
-                detection = detection[keep, :]
-                landmarks = landmarks[keep].astype(int)
+                landmarks = landmarks[keep].int()
 
-                if detection.shape[0] == 0:
+                if boxes.shape[0] == 0:
                     continue
 
-                bboxes = detection[:, :4].astype(int)
-                confidence = detection[:, 4].astype(np.float64)
+                scores = scores[keep].cpu().numpy().astype(np.float64)
 
-                for crop_id in range(len(detection)):
+                for crop_id, bbox in enumerate(boxes):
 
-                    bbox = bboxes[crop_id]
+                    bbox = bbox.cpu().numpy()
 
-                    labels += [{"crop_id": crop_id, "bbox": bbox.tolist(), "score": confidence[crop_id]}]
+                    labels += [
+                        {
+                            "crop_id": crop_id,
+                            "bbox": bbox.tolist(),
+                            "score": scores[crop_id],
+                            "landmarks": landmarks[crop_id].tolist(),
+                        }
+                    ]
 
                     if args.save_crops:
                         x_min, y_min, x_max, y_max = bbox
@@ -292,7 +298,6 @@ def main():
                         "file_path": image_path,
                         "file_id": file_id,
                         "bboxes": labels,
-                        "landmarks": landmarks[crop_id].tolist(),
                     }
 
                     with open(output_label_path / f"{file_id}.json", "w") as f:

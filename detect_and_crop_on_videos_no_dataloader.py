@@ -12,9 +12,11 @@ labels
     <video_id>.json
 """
 import argparse
+import gc
 import json
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Union
 
 import albumentations as albu
 import cv2
@@ -23,6 +25,7 @@ import torch
 import torch.backends.cudnn as cudnn
 from decord import VideoReader, cpu, gpu
 from pytorch_toolbelt.utils.torch_utils import tensor_from_rgb_image
+from torch.utils import dlpack
 from tqdm import tqdm
 
 from data import cfg_mnet, cfg_re50
@@ -83,15 +86,32 @@ def get_args():
     arg("-n", "--num_videos", type=int, help="Number of videos to use")
 
     arg("-v", "--video_decoder", type=str, help="Where to decode videos.", choices=["cpu", "gpu"], default="cpu")
-    arg("-f", "--num_frames", type=int, help="Number of frames to extract")
+    arg("-f", "--num_frames", type=int, help="Number of frames to extract", default=1)
+    arg("--resize_coeff", nargs=2, help="min and max sizes for images", type=int, default=[1600, 2150])
     return parser.parse_args()
 
 
-def prepare_image(raw_frame: np.array, transform):
+def prepare_image_cpu(raw_frame: Union[np.array, torch.tensor], transform: albu.Compose) -> torch.tensor:
     frame = raw_frame.astype(np.float32)
     new_frame = transform(image=frame)["image"]
     new_frame = tensor_from_rgb_image(new_frame)
     return new_frame.unsqueeze(0)
+
+
+def prepare_image_gpu(raw_frame: Union[np.array, torch.tensor]) -> torch.tensor:
+    new_frame = raw_frame.float()  # Not sure if I need this.
+    new_frame -= torch.Tensor((104, 117, 123)).cuda()
+    new_frame = new_frame.permute(2, 0, 1)
+    return new_frame.unsqueeze(0)
+
+
+def prepare_image(
+    raw_frame: Union[np.array, torch.tensor], transform: albu.Compose, video_decoder: str = "cpu"
+) -> torch.tensor:
+    if video_decoder == "cpu":
+        return prepare_image_cpu(raw_frame, transform)
+
+    return prepare_image_gpu(raw_frame)
 
 
 def main():
@@ -162,11 +182,18 @@ def main():
                 else:
                     raise ValueError(f"Expect None or integer > 1 for args.num_frames, but got {args.num_frames}")
 
-                frames = video.get_batch(frame_ids).asnumpy()
+                frames = video.get_batch(frame_ids)
+
+                if args.video_decoder == "cpu":
+                    frames = frames.asnumpy()
+                elif args.video_decoder == "gpu":
+                    frames = dlpack.from_dlpack(frames.to_dlpack())
 
                 if args.video_decoder == "gpu":
                     del video
                     torch.cuda.empty_cache()
+
+                    gc.collect()
 
             num_frames = len(frames)
 
@@ -198,10 +225,26 @@ def main():
             priors = priors.to(device)
             prior_data = priors.data
 
+            if args.resize_coeff is not None:
+                target_size = min(args.resize_coeff)
+                max_size = max(args.resize_coeff)
+
+                image_height = frames.shape[1]
+                image_width = frames.shape[2]
+
+                image_size_min = min([image_width, image_height])
+                image_size_max = max([image_width, image_height])
+
+                resize = float(target_size) / float(image_size_min)
+                if np.round(resize * image_size_max) > max_size:
+                    resize = float(max_size) / float(image_size_max)
+            else:
+                resize = 1
+
             for pred_id in range(num_frames):
                 frame = frames[pred_id]
 
-                torched_image = prepare_image(frame, transform).to(device)
+                torched_image = prepare_image(frame, transform, args.video_decoder).to(device)
 
                 if args.fp16:
                     torched_image = torched_image.half()
@@ -212,14 +255,14 @@ def main():
 
                 boxes = decode(loc.data[0], prior_data, cfg["variance"])
 
-                boxes *= scale
+                boxes *= scale / resize
 
                 boxes = boxes.cpu().numpy()
                 scores = conf[0].data.cpu().numpy()[:, 1]
 
                 landmarks = decode_landm(land.data[0], prior_data, cfg["variance"])
 
-                landmarks *= scale1
+                landmarks *= scale1 / resize
                 landmarks = landmarks.cpu().numpy()
 
                 # ignore low scores
@@ -255,7 +298,14 @@ def main():
 
                     bbox = bboxes[crop_id]
 
-                    labels += [{"crop_id": crop_id, "bbox": bbox.tolist(), "score": confidence[crop_id]}]
+                    labels += [
+                        {
+                            "crop_id": crop_id,
+                            "bbox": bbox.tolist(),
+                            "score": confidence[crop_id],
+                            "landmarks": landmarks[crop_id].tolist(),
+                        }
+                    ]
 
                     if args.save_crops:
                         x_min, y_min, x_max, y_max = bbox
@@ -284,7 +334,6 @@ def main():
                         "file_path": str(video_path),
                         "file_id": video_id,
                         "bboxes": labels,
-                        "landmarks": landmarks[crop_id].tolist(),
                     }
 
                     with open(output_label_path / f"{video_id}.json", "w") as f:

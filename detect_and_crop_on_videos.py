@@ -21,8 +21,6 @@ import cv2
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
-from catalyst.dl import SupervisedRunner
-from catalyst.dl.utils import process_components
 from decord import VideoReader, cpu
 from pytorch_toolbelt.utils.torch_utils import tensor_from_rgb_image
 from torch.utils.data import Dataset, DataLoader
@@ -32,9 +30,9 @@ from data import cfg_mnet_test, cfg_re50_test
 from layers.functions.prior_box import PriorBox
 from models.retinaface import RetinaFace
 from utils.box_utils import decode, decode_landm
-from utils.general import load_model
-from utils.general import split_array
-from utils.nms.py_cpu_nms import py_cpu_nms
+from utils.general import load_model, split_array
+
+from torchvision.ops import nms
 
 
 def get_args():
@@ -67,7 +65,6 @@ def get_args():
     arg("-j", "--num_workers", type=int, help="Number of CPU threads", default=64)
     arg("-s", "--save_crops", action="store_true", default=False, help="If we want to store crops.")
     arg("-b", "--save_boxes", action="store_true", default=False, help="If we want to store bounding boxes.")
-    arg("--origin_size", default=True, type=str, help="Whether use origin image size to evaluate")
     arg("--fp16", action="store_true", help="Whether use fp16")
     arg("-n", "--num_videos", type=int, help="Number of videos to use")
     arg(
@@ -89,36 +86,41 @@ class InferenceDataset(Dataset):
         num_frames: Union[int, None],
         transform: albu.Compose,
         resize_coeff: Union[tuple, None],
+        output_label_path: Path,
     ):
         self.video_paths = video_paths
         self.num_frames = num_frames
         self.transform = transform
         self.resize_coeff = resize_coeff
+        self.output_label_path = output_label_path
 
     def __len__(self):
         return len(self.video_paths)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> dict:
         video_path = self.video_paths[idx]
+
+        video_id = video_path.stem
+
+        output_json_path = self.output_label_path / f"{video_id}.json"
+
+        if output_json_path.exists():
+            return {}
 
         video = VideoReader(str(video_path), ctx=cpu(0))
         len_video = len(video)
 
-        if self.num_frames is None or self.num_frames == 1:
+        if self.num_frames is None:
             frame_ids = list(range(len_video))
-        elif self.num_frames > 1:
+        else:
             if len_video < self.num_frames:
                 step = 1
             else:
                 step = int(len_video / self.num_frames)
 
             frame_ids = list(range(0, len_video, step))[: self.num_frames]
-        else:
-            raise ValueError(f"Expect None or integer > 1 for args.num_frames, but got {self.num_frames}")
 
         frames = video.get_batch(frame_ids).asnumpy()
-
-        del video
 
         torched_frames, resize = self.prepare_frames(frames)
 
@@ -179,13 +181,15 @@ def main():
         raise NotImplementedError(f"Only mobile0.25 and resnet50 are suppoted.")
 
     # net and model
-    model = RetinaFace(cfg=cfg, phase="test")
-    model = load_model(model, args.trained_model, args.cpu)
-    model.eval()
+    net = RetinaFace(cfg=cfg, phase="test")
+    net = load_model(net, args.trained_model, args.cpu)
+    net.eval()
 
-    net, _, _, _, device = process_components(model=model)
+    if args.fp16:
+        net = net.half()
 
-    runner = SupervisedRunner(model=model, device=device, output_key="preds")
+    device = torch.device("cpu" if args.cpu else "cuda")
+    net.to(device)
 
     print("Finished loading model!")
     cudnn.benchmark = True
@@ -198,14 +202,6 @@ def main():
         start, end = split_array(len(file_paths), args.num_gpu, args.gpu_id)
         file_paths = file_paths[start:end]
 
-    test_loader = DataLoader(
-        InferenceDataset(file_paths, args.num_frames, transform=transform, resize_coeff=args.resize_coeff),
-        batch_size=1,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=False,
-    )
-
     output_path = args.output_path
 
     if args.save_boxes:
@@ -216,9 +212,28 @@ def main():
         output_image_path = output_path / "images"
         output_image_path.mkdir(exist_ok=True, parents=True)
 
+    test_loader = DataLoader(
+        InferenceDataset(
+            file_paths,
+            args.num_frames,
+            transform=transform,
+            resize_coeff=args.resize_coeff,
+            output_label_path=output_label_path,
+        ),
+        batch_size=1,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
+
     with torch.no_grad():
         for raw_input in tqdm(test_loader):
+            if not raw_input:
+                continue
             torched_frames = raw_input["torched_frames"][0]
+
+            if args.fp16:
+                torched_frames = torched_frames.half()
 
             resize = raw_input["resize"][0]
             video_path = Path(raw_input["video_path"][0])
@@ -261,9 +276,7 @@ def main():
             for start_index in range(0, num_frames, args.batch_size):
                 end_index = min(start_index + args.batch_size, num_frames)
 
-                loc, conf, land = runner.predict_batch({"features": torched_frames[start_index:end_index].to(device)})[
-                    "preds"
-                ]
+                loc, conf, land = net(torched_frames[start_index:end_index].to(device))
 
                 batch_size = loc.shape[0]
 
@@ -273,49 +286,46 @@ def main():
                     boxes = decode(loc.data[pred_id], prior_data, cfg["variance"])
 
                     boxes *= scale / resize
-
-                    boxes = boxes.cpu().numpy()
-                    scores = conf[pred_id].data.cpu().numpy()[:, 1]
+                    scores = conf[pred_id][:, 1]
 
                     landmarks = decode_landm(land.data[pred_id], prior_data, cfg["variance"])
-
                     landmarks *= scale1 / resize
-                    landmarks = landmarks.cpu().numpy()
 
                     # ignore low scores
-                    valid_index = np.where(scores > args.confidence_threshold)[0]
+                    valid_index = torch.where(scores > args.confidence_threshold)[0]
                     boxes = boxes[valid_index]
                     landmarks = landmarks[valid_index]
                     scores = scores[valid_index]
 
-                    # keep top-K before NMS
-                    order = scores.argsort()[::-1]
-                    # order = scores.argsort()[::-1][:args.top_k]
+                    order = scores.argsort(descending=True)
+
                     boxes = boxes[order]
                     landmarks = landmarks[order]
                     scores = scores[order]
 
                     # do NMS
-                    detection = np.hstack((boxes, scores[:, np.newaxis])).astype(np.float32, copy=False)
-                    keep = py_cpu_nms(detection, args.nms_threshold)
-                    # keep = nms(detection, args.nms_threshold,force_cpu=args.cpu)
+                    keep = nms(boxes, scores, args.nms_threshold)
+                    boxes = boxes[keep, :].int()
 
-                    # x_min, y_min, x_max, y_max, score
-                    detection = detection[keep, :]
+                    landmarks = landmarks[keep].int()
 
-                    landmarks = landmarks[keep].astype(int)
-
-                    if detection.shape[0] == 0:
+                    if boxes.shape[0] == 0:
                         continue
 
-                    bboxes = detection[:, :4].astype(int)
-                    confidence = detection[:, 4].astype(np.float64)
+                    scores = scores[keep].cpu().numpy().astype(np.float64)
 
-                    for crop_id in range(len(detection)):
+                    for crop_id, bbox in enumerate(boxes):
 
-                        bbox = bboxes[crop_id]
+                        bbox = bbox.cpu().numpy()
 
-                        labels += [{"crop_id": crop_id, "bbox": bbox.tolist(), "score": confidence[crop_id]}]
+                        labels += [
+                            {
+                                "crop_id": crop_id,
+                                "bbox": bbox.tolist(),
+                                "score": scores[crop_id],
+                                "landmarks": landmarks[crop_id].tolist(),
+                            }
+                        ]
 
                         if args.save_crops:
                             x_min, y_min, x_max, y_max = bbox
@@ -344,7 +354,6 @@ def main():
                             "file_path": str(video_path),
                             "file_id": video_id,
                             "bboxes": labels,
-                            "landmarks": landmarks[crop_id].tolist(),
                         }
 
                         with open(output_label_path / f"{video_id}.json", "w") as f:
