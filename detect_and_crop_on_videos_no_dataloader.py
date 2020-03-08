@@ -300,6 +300,7 @@ def main():
 
                     labels += [
                         {
+                            "frame_id": frame_id,
                             "crop_id": crop_id,
                             "bbox": bbox.tolist(),
                             "score": confidence[crop_id],
