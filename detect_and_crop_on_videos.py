@@ -320,7 +320,7 @@ def main():
 
                         labels += [
                             {
-                                "frame_id": frame_id,
+                                "frame_id": int(frame_id),
                                 "crop_id": crop_id,
                                 "bbox": bbox.tolist(),
                                 "score": scores[crop_id],
