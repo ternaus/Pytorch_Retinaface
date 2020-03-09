@@ -86,7 +86,7 @@ class InferenceDataset(Dataset):
         num_frames: Union[int, None],
         transform: albu.Compose,
         resize_coeff: Union[tuple, None],
-        output_label_path: Path,
+        output_label_path: Union[Path, None],
     ):
         self.video_paths = video_paths
         self.num_frames = num_frames
@@ -102,10 +102,11 @@ class InferenceDataset(Dataset):
 
         video_id = video_path.stem
 
-        output_json_path = self.output_label_path / f"{video_id}.json"
+        if self.output_label_path is not None:
+            output_json_path = self.output_label_path / f"{video_id}.json"
 
-        if output_json_path.exists():
-            return {}
+            if output_json_path.exists():
+                return {}
 
         video = VideoReader(str(video_path), ctx=cpu(0))
         len_video = len(video)
@@ -207,6 +208,8 @@ def main():
     if args.save_boxes:
         output_label_path = output_path / "labels"
         output_label_path.mkdir(exist_ok=True, parents=True)
+    else:
+        output_label_path = None
 
     if args.save_crops:
         output_image_path = output_path / "images"
