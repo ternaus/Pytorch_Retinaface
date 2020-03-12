@@ -31,7 +31,7 @@ from data import cfg_mnet_test, cfg_re50_test
 from layers.functions.prior_box import PriorBox
 from models.retinaface import RetinaFace
 from utils.box_utils import decode, decode_landm
-from utils.general import load_model, split_array
+from utils.general import load_model, split_array, resize
 
 
 def get_args():
@@ -74,6 +74,14 @@ def get_args():
     )
     arg("-v", "--video_decoder", type=str, help="Where to decode videos.", choices=["cpu", "gpu"], default="cpu")
     arg("-f", "--num_frames", type=int, help="Number of frames to extract")
+    arg("--min_size", type=int, help="Minimum size of the bounding box.", default=50)
+    arg(
+        "-r",
+        "--resize_factor",
+        type=float,
+        help="How bigger / smaller crops should be with respect " "to the original size.",
+        default=1,
+    )
     arg("--resize_coeff", nargs=2, help="min and max sizes for images", type=int, default=[1600, 2150])
     return parser.parse_args()
 
@@ -122,11 +130,11 @@ class InferenceDataset(Dataset):
 
         frames = video.get_batch(frame_ids).asnumpy()
 
-        torched_frames, resize = self.prepare_frames(frames)
+        torched_frames, resize_factor = self.prepare_frames(frames)
 
         result = {
             "torched_frames": torched_frames,
-            "resize": resize,
+            "resize_factor": resize_factor,
             "video_path": str(video_path),
             "frame_ids": np.array(frame_ids),
             "frames": frames,
@@ -145,17 +153,19 @@ class InferenceDataset(Dataset):
             image_size_min = min([image_width, image_height])
             image_size_max = max([image_width, image_height])
 
-            resize = float(target_size) / float(image_size_min)
-            if np.round(resize * image_size_max) > max_size:
-                resize = float(max_size) / float(image_size_max)
+            resize_factor = float(target_size) / float(image_size_min)
+            if np.round(resize_factor * image_size_max) > max_size:
+                resize_factor = float(max_size) / float(image_size_max)
         else:
-            resize = 1
+            resize_factor = 1
 
         result = []
 
         for frame in frames:
-            if self.resize_coeff is not None and resize != 1:
-                frame = cv2.resize(frame, None, None, fx=resize, fy=resize, interpolation=cv2.INTER_LINEAR)
+            if self.resize_coeff is not None and resize_factor != 1:
+                frame = cv2.resize(
+                    frame, None, None, fx=resize_factor, fy=resize_factor, interpolation=cv2.INTER_LINEAR
+                )
 
             new_frame = self.transform(image=frame)["image"]
 
@@ -166,7 +176,7 @@ class InferenceDataset(Dataset):
         else:
             result = torch.unsqueeze(result[0], 0)
 
-        return result, resize
+        return result, resize_factor
 
 
 def main():
@@ -191,6 +201,7 @@ def main():
         "num_workers": args.num_workers,
         "nms_threshold": args.nms_threshold,
         "batch_size": args.batch_size,
+        "resize_factor": args.resize_factor,
     }
 
     process_video_files(**parameters)
@@ -213,6 +224,7 @@ def process_video_files(
     num_workers: int,
     nms_threshold: float,
     batch_size: int,
+    resize_factor: float,
 ) -> None:
     torch.set_grad_enabled(False)
 
@@ -284,7 +296,7 @@ def process_video_files(
             if if_fp16:
                 torched_frames = torched_frames.half()
 
-            resize = raw_input["resize"][0]
+            resize_factor = raw_input["resize_factor"][0]
             video_path = Path(raw_input["video_path"][0])
             frame_ids = raw_input["frame_ids"][0].numpy()
             frames = raw_input["frames"][0]
@@ -332,11 +344,11 @@ def process_video_files(
 
                     boxes = decode(loc.data[pred_id], prior_data, cfg["variance"])
 
-                    boxes *= scale / resize
+                    boxes *= scale / resize_factor
                     scores = conf[pred_id][:, 1]
 
                     landmarks = decode_landm(land.data[pred_id], prior_data, cfg["variance"])
-                    landmarks *= scale1 / resize
+                    landmarks *= scale1 / resize_factor
 
                     # ignore low scores
                     valid_index = torch.where(scores > confidence_threshold)[0]
@@ -377,8 +389,15 @@ def process_video_files(
                         if if_save_crops:
                             x_min, y_min, x_max, y_max = bbox
 
-                            x_min = max(0, x_min)
-                            y_min = max(0, y_min)
+                            x_min = np.clip(x_min, 0, image_width - 1)
+                            y_min = np.clip(y_min, 0, image_height - 1)
+
+                            x_max = np.clip(x_max, x_min + 1, image_width - 1)
+                            y_max = np.clip(y_max, y_min + 1, image_height - 1)
+
+                            x_min, y_min, x_max, y_max = resize(
+                                x_min, y_min, x_max, y_max, image_height, image_width, resize_coeff=resize_factor
+                            )
 
                             crop = frames[pred_id][y_min:y_max, x_min:x_max]
 
@@ -406,8 +425,6 @@ def process_video_files(
                         with open(output_label_path / f"{video_id}.json", "w") as f:
                             json.dump(result, f, indent=2)
 
-
-#
 
 if __name__ == "__main__":
     main()
