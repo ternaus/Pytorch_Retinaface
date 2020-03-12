@@ -14,7 +14,7 @@ labels
 import argparse
 import json
 from pathlib import Path
-from typing import Union, List
+from typing import Union, List, Tuple, Optional
 
 import albumentations as albu
 import cv2
@@ -24,6 +24,7 @@ import torch.backends.cudnn as cudnn
 from decord import VideoReader, cpu
 from pytorch_toolbelt.utils.torch_utils import tensor_from_rgb_image
 from torch.utils.data import Dataset, DataLoader
+from torchvision.ops import nms
 from tqdm import tqdm
 
 from data import cfg_mnet_test, cfg_re50_test
@@ -31,8 +32,6 @@ from layers.functions.prior_box import PriorBox
 from models.retinaface import RetinaFace
 from utils.box_utils import decode, decode_landm
 from utils.general import load_model, split_array
-
-from torchvision.ops import nms
 
 
 def get_args():
@@ -85,7 +84,7 @@ class InferenceDataset(Dataset):
         video_paths: List[Path],
         num_frames: Union[int, None],
         transform: albu.Compose,
-        resize_coeff: Union[tuple, None],
+        resize_coeff: Optional[tuple],
         output_label_path: Union[Path, None],
     ):
         self.video_paths = video_paths
@@ -172,62 +171,109 @@ class InferenceDataset(Dataset):
 
 def main():
     args = get_args()
+
+    file_paths = sorted(args.input_path.rglob("*.mp4"))[: args.num_videos]
+
+    parameters = {
+        "network": args.network,
+        "trained_model": args.trained_model,
+        "if_cpu": args.cpu,
+        "if_fp16": args.fp16,
+        "file_paths": file_paths,
+        "num_gpu": args.num_gpu,
+        "gpu_id": args.gpu_id,
+        "output_path": args.output_path,
+        "if_save_boxes": args.save_boxes,
+        "if_save_crops": args.save_crops,
+        "num_frames": args.num_frames,
+        "resize_coeff": args.resize_coeff,
+        "confidence_threshold": args.confidence_threshold,
+        "num_workers": args.num_workers,
+        "nms_threshold": args.nms_threshold,
+        "batch_size": args.batch_size,
+    }
+
+    process_video_files(**parameters)
+
+
+def process_video_files(
+    network: str,
+    trained_model: str,
+    if_cpu: bool,
+    if_fp16: bool,
+    file_paths: list,
+    num_gpu: Optional[int],
+    gpu_id: int,
+    output_path: Path,
+    if_save_boxes: bool,
+    if_save_crops: bool,
+    num_frames: int,
+    resize_coeff: Optional[Tuple],
+    confidence_threshold: float,
+    num_workers: int,
+    nms_threshold: float,
+    batch_size: int,
+) -> None:
     torch.set_grad_enabled(False)
 
-    if args.network == "mobile0.25":
+    if network == "mobile0.25":
         cfg = cfg_mnet_test
-    elif args.network == "resnet50":
+    elif network == "resnet50":
         cfg = cfg_re50_test
     else:
         raise NotImplementedError(f"Only mobile0.25 and resnet50 are suppoted.")
 
     # net and model
     net = RetinaFace(cfg=cfg, phase="test")
-    net = load_model(net, args.trained_model, args.cpu)
+    net = load_model(net, trained_model, if_cpu)
     net.eval()
 
-    if args.fp16:
+    if if_fp16:
         net = net.half()
 
-    device = torch.device("cpu" if args.cpu else "cuda")
+    device = torch.device("cpu" if if_cpu else "cuda")
     net.to(device)
 
     print("Finished loading model!")
     cudnn.benchmark = True
 
-    file_paths = sorted(args.input_path.rglob("*.mp4"))[: args.num_videos]
-
     transform = albu.Compose([albu.Normalize(p=1, mean=(104, 117, 123), std=(1.0, 1.0, 1.0), max_pixel_value=1)], p=1)
 
-    if args.num_gpu is not None:
-        start, end = split_array(len(file_paths), args.num_gpu, args.gpu_id)
+    if num_gpu is not None:
+        start, end = split_array(len(file_paths), num_gpu, gpu_id)
         file_paths = file_paths[start:end]
 
-    output_path = args.output_path
-
-    if args.save_boxes:
-        output_label_path = output_path / "labels"
-        output_label_path.mkdir(exist_ok=True, parents=True)
-    else:
-        output_label_path = None
-
-    if args.save_crops:
+    if if_save_crops:
         output_image_path = output_path / "images"
         output_image_path.mkdir(exist_ok=True, parents=True)
 
-    test_loader = DataLoader(
-        InferenceDataset(
-            file_paths,
-            args.num_frames,
-            transform=transform,
-            resize_coeff=args.resize_coeff,
-            output_label_path=output_label_path,
-        ),
-        batch_size=1,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=False,
-    )
+    if if_save_boxes:
+        output_label_path: Path = output_path / "labels"
+        output_label_path.mkdir(exist_ok=True, parents=True)
+
+        test_loader = DataLoader(
+            InferenceDataset(
+                file_paths,
+                num_frames,
+                transform=transform,
+                resize_coeff=resize_coeff,
+                output_label_path=output_label_path,
+            ),
+            batch_size=1,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=False,
+        )
+    else:
+        test_loader = DataLoader(
+            InferenceDataset(
+                file_paths, num_frames, transform=transform, resize_coeff=resize_coeff, output_label_path=None,
+            ),
+            batch_size=1,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=False,
+        )
 
     with torch.no_grad():
         for raw_input in tqdm(test_loader):
@@ -235,7 +281,7 @@ def main():
                 continue
             torched_frames = raw_input["torched_frames"][0]
 
-            if args.fp16:
+            if if_fp16:
                 torched_frames = torched_frames.half()
 
             resize = raw_input["resize"][0]
@@ -247,7 +293,7 @@ def main():
 
             video_id = video_path.stem
 
-            labels = []
+            labels: List[dict] = []
 
             image_height, image_width = torched_frames.shape[2:]
 
@@ -276,14 +322,12 @@ def main():
             priors = priors.to(device)
             prior_data = priors.data
 
-            for start_index in range(0, num_frames, args.batch_size):
-                end_index = min(start_index + args.batch_size, num_frames)
+            for start_index in range(0, num_frames, batch_size):
+                end_index = min(start_index + batch_size, num_frames)
 
                 loc, conf, land = net(torched_frames[start_index:end_index].to(device))
 
-                batch_size = loc.shape[0]
-
-                for pred_id in range(batch_size):
+                for pred_id in range(loc.shape[0]):
                     frame_id = frame_ids[start_index + pred_id]
 
                     boxes = decode(loc.data[pred_id], prior_data, cfg["variance"])
@@ -295,7 +339,7 @@ def main():
                     landmarks *= scale1 / resize
 
                     # ignore low scores
-                    valid_index = torch.where(scores > args.confidence_threshold)[0]
+                    valid_index = torch.where(scores > confidence_threshold)[0]
                     boxes = boxes[valid_index]
                     landmarks = landmarks[valid_index]
                     scores = scores[valid_index]
@@ -307,7 +351,7 @@ def main():
                     scores = scores[order]
 
                     # do NMS
-                    keep = nms(boxes, scores, args.nms_threshold)
+                    keep = nms(boxes, scores, nms_threshold)
                     boxes = boxes[keep, :].int()
 
                     landmarks = landmarks[keep].int()
@@ -318,7 +362,6 @@ def main():
                     scores = scores[keep].cpu().numpy().astype(np.float64)
 
                     for crop_id, bbox in enumerate(boxes):
-
                         bbox = bbox.cpu().numpy()
 
                         labels += [
@@ -331,7 +374,7 @@ def main():
                             }
                         ]
 
-                        if args.save_crops:
+                        if if_save_crops:
                             x_min, y_min, x_max, y_max = bbox
 
                             x_min = max(0, x_min)
@@ -353,7 +396,7 @@ def main():
                                 [int(cv2.IMWRITE_JPEG_QUALITY), 90],
                             )
 
-                    if args.save_boxes:
+                    if if_save_boxes:
                         result = {
                             "file_path": str(video_path),
                             "file_id": video_id,
