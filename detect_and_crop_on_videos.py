@@ -77,7 +77,7 @@ def get_args():
     arg("--min_size", type=int, help="Minimum size of the bounding box.", default=50)
     arg(
         "-r",
-        "--resize_factor",
+        "--resize_scale",
         type=float,
         help="How bigger / smaller crops should be with respect " "to the original size.",
         default=1,
@@ -201,7 +201,8 @@ def main():
         "num_workers": args.num_workers,
         "nms_threshold": args.nms_threshold,
         "batch_size": args.batch_size,
-        "resize_factor": args.resize_factor,
+        "resize_scale": args.resize_scale,
+        "min_size": args.min_size,
     }
 
     process_video_files(**parameters)
@@ -224,7 +225,8 @@ def process_video_files(
     num_workers: int,
     nms_threshold: float,
     batch_size: int,
-    resize_factor: float,
+    resize_scale: float,
+    min_size: int,
 ) -> None:
     torch.set_grad_enabled(False)
 
@@ -233,7 +235,10 @@ def process_video_files(
     elif network == "resnet50":
         cfg = cfg_re50_test
     else:
-        raise NotImplementedError(f"Only mobile0.25 and resnet50 are suppoted.")
+        raise NotImplementedError(f"Only mobile0.25 and resnet50 are suppoted, but we got {network}")
+
+    if min_size < 0:
+        raise ValueError(f"Min size should be positive, but we got {min_size}.")
 
     # net and model
     net = RetinaFace(cfg=cfg, phase="test")
@@ -374,13 +379,13 @@ def process_video_files(
                     scores = scores[keep].cpu().numpy().astype(np.float64)
 
                     for crop_id, bbox in enumerate(boxes):
-                        bbox = bbox.cpu().numpy()
+                        bbox = bbox.cpu().numpy().tolist()
 
                         labels += [
                             {
                                 "frame_id": int(frame_id),
                                 "crop_id": crop_id,
-                                "bbox": bbox.tolist(),
+                                "bbox": bbox,
                                 "score": scores[crop_id],
                                 "landmarks": landmarks[crop_id].tolist(),
                             }
@@ -395,8 +400,14 @@ def process_video_files(
                             x_max = np.clip(x_max, x_min + 1, image_width - 1)
                             y_max = np.clip(y_max, y_min + 1, image_height - 1)
 
+                            crop_width = x_max - x_min
+                            crop_hegith = y_max - y_min
+
+                            if crop_width < min_size or crop_hegith < min_size:
+                                continue
+
                             x_min, y_min, x_max, y_max = resize(
-                                x_min, y_min, x_max, y_max, image_height, image_width, resize_coeff=resize_factor
+                                x_min, y_min, x_max, y_max, image_height, image_width, resize_coeff=resize_scale
                             )
 
                             crop = frames[pred_id][y_min:y_max, x_min:x_max]
