@@ -177,6 +177,7 @@ def process_frames(
     net: torch.nn.Module,
     min_size: int,
     resize_scale: float,
+    keep_top_k: Optional[int],
 ) -> None:
     if is_save_crops and output_path is not None:
         output_image_path = output_path / "images"
@@ -246,9 +247,9 @@ def process_frames(
 
             order = scores.argsort(descending=True)
 
-            boxes = boxes[order]
-            landmarks = landmarks[order]
-            scores = scores[order]
+            boxes = boxes[order][:keep_top_k, :]
+            landmarks = landmarks[order][:keep_top_k, :]
+            scores = scores[order][:keep_top_k]
 
             # do NMS
             keep = nms(boxes, scores, nms_threshold)
@@ -344,6 +345,7 @@ def main():
         "batch_size": args.batch_size,
         "resize_scale": args.resize_scale,
         "min_size": args.min_size,
+        "keep_top_k": args.keep_top_k,
     }
 
     process_video_files(**parameters)
@@ -368,6 +370,7 @@ def process_video_files(
     batch_size: int,
     resize_scale: float,
     min_size: int,
+    keep_top_k: int,
 ) -> None:
     torch.set_grad_enabled(False)
 
@@ -423,6 +426,7 @@ def process_video_files(
                     result["net"] = net
                     result["min_size"] = min_size
                     result["resize_scale"] = resize_scale
+                    result["keep_top_k"] = keep_top_k
 
                     process_frames(**result)
 
