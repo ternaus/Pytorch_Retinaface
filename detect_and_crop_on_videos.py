@@ -33,6 +33,7 @@ from layers.functions.prior_box import PriorBox
 from models.retinaface import RetinaFace
 from utils.box_utils import decode, decode_landm
 from utils.general import load_model, split_array, resize
+from decord._ffi.base import DECORDError
 
 
 def get_args():
@@ -90,34 +91,38 @@ def get_args():
 def get_frames(
     video_path: Path, num_frames: int, resize_coeff: Tuple[int, int], transform: albu.Compose, decode_gpu: bool
 ) -> Dict[str, Any]:
-    if decode_gpu:
-        video = VideoReader(str(video_path), ctx=gpu(0))
-    else:
-        video = VideoReader(str(video_path), ctx=cpu(0))
-
-    len_video = len(video)
-
-    if num_frames is None:
-        frame_ids = list(range(len_video))
-    else:
-        if len_video < num_frames:
-            step = 1
+    try:
+        if decode_gpu:
+            video = VideoReader(str(video_path), ctx=gpu(0))
         else:
-            step = int(len_video / num_frames)
+            video = VideoReader(str(video_path), ctx=cpu(0))
 
-        frame_ids = list(range(0, len_video, step))[:num_frames]
+        len_video = len(video)
 
-    frames = video.get_batch(frame_ids).asnumpy()
+        if num_frames is None:
+            frame_ids = list(range(len_video))
+        else:
+            if len_video < num_frames:
+                step = 1
+            else:
+                step = int(len_video / num_frames)
 
-    torched_frames, resize_factor = prepare_frames(frames, resize_coeff, transform)
+            frame_ids = list(range(0, len_video, step))[:num_frames]
 
-    result = {
-        "torched_frames": torched_frames,
-        "resize_factor": resize_factor,
-        "video_path": video_path,
-        "frame_ids": np.array(frame_ids),
-        "frames": frames,
-    }
+        frames = video.get_batch(frame_ids).asnumpy()
+
+        torched_frames, resize_factor = prepare_frames(frames, resize_coeff, transform)
+
+        result = {
+            "torched_frames": torched_frames,
+            "resize_factor": resize_factor,
+            "video_path": video_path,
+            "frame_ids": np.array(frame_ids),
+            "frames": frames,
+        }
+    except DECORDError:
+        print(f"{video_path} is broken")
+        result = {}
 
     return result
 
@@ -414,21 +419,22 @@ def process_video_files(
                 for result in tqdm(
                     executor.map(func, file_paths), total=len(file_paths), leave=False, desc="Loading data files"
                 ):
-                    result["is_fp16"] = is_fp16
-                    result["device"] = device
-                    result["batch_size"] = batch_size
-                    result["cfg"] = cfg
-                    result["nms_threshold"] = nms_threshold
-                    result["confidence_threshold"] = confidence_threshold
-                    result["is_save_crops"] = is_save_crops
-                    result["is_save_boxes"] = is_save_boxes
-                    result["output_path"] = output_path
-                    result["net"] = net
-                    result["min_size"] = min_size
-                    result["resize_scale"] = resize_scale
-                    result["keep_top_k"] = keep_top_k
+                    if len(result) != 0:
+                        result["is_fp16"] = is_fp16
+                        result["device"] = device
+                        result["batch_size"] = batch_size
+                        result["cfg"] = cfg
+                        result["nms_threshold"] = nms_threshold
+                        result["confidence_threshold"] = confidence_threshold
+                        result["is_save_crops"] = is_save_crops
+                        result["is_save_boxes"] = is_save_boxes
+                        result["output_path"] = output_path
+                        result["net"] = net
+                        result["min_size"] = min_size
+                        result["resize_scale"] = resize_scale
+                        result["keep_top_k"] = keep_top_k
 
-                    process_frames(**result)
+                        process_frames(**result)
 
 
 if __name__ == "__main__":
